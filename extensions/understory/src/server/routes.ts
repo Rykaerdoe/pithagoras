@@ -176,10 +176,15 @@ export function understoryRoutes(router: Router): void {
     if (!service.validInterval(dreamInterval)) return res.status(400).json({ error: "Tidying up takes an interval like 30m, 6h or 1d, of at least 5 minutes" });
     const dreamAt = typeof req.body?.dreamAt === "string" ? req.body.dreamAt.trim() : "";
     if (!service.validTime(dreamAt)) return res.status(400).json({ error: "Tidying up at a time takes one like 03:00" });
+    // Absent from the request means unchanged: the settings page has no field for it yet, so saving
+    // the schedule must not quietly drop a step limit that was set another way.
+    const agentMaxSteps =
+      typeof req.body?.agentMaxSteps === "string" ? req.body.agentMaxSteps.trim() : service.config().agentMaxSteps;
+    if (!service.validSteps(agentMaxSteps)) return res.status(400).json({ error: "The step limit takes a whole number from 12 to 200, or nothing for the default" });
     // What Understory would be started with, worked out first: a choice it
     // could not be started with is refused, not saved.
     try {
-      await service.spec({ ...service.config(), llm: service.withSavedKey(llm), dreamInterval, dreamAt }, "check");
+      await service.spec({ ...service.config(), llm: service.withSavedKey(llm), dreamInterval, dreamAt, agentMaxSteps }, "check");
     } catch (e) {
       return res.status(400).json({ error: (e as Error).message });
     }
@@ -188,7 +193,7 @@ export function understoryRoutes(router: Router): void {
     // Made anew as it was: one stopped stays stopped, and runs no pass meanwhile.
     const wasRunning = wasInstalled && (await service.status()).container === "running";
     try {
-      service.saveConfig({ llm, dreamInterval, dreamAt });
+      service.saveConfig({ llm, dreamInterval, dreamAt, agentMaxSteps });
       if (wasInstalled) await service.install({ start: wasRunning });
       res.json({ understory: await understoryState() });
     } catch (e) {

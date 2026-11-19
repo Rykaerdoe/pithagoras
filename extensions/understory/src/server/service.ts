@@ -58,6 +58,13 @@ export interface UnderstoryConfig {
    * start. Wins over the interval.
    */
   dreamAt: string;
+  /**
+   * How far one pass of the model may go, handed to Understory as AGENT_MAX_STEPS.
+   * Empty is the default below. Understory's own is 12 steps, which reads a memory
+   * but cannot tidy one: a pass stopped at the limit leaves half-written files and
+   * says nothing was wrong.
+   */
+  agentMaxSteps: string;
 }
 
 /** Understory's own reading of an interval, and its floor: five minutes. */
@@ -76,6 +83,16 @@ export function validInterval(raw: string): boolean {
   return ms !== null && ms >= 5 * 60_000;
 }
 
+/** Understory's own limit is 12. Measured against it: a pass over 27 concepts needed more than that and finished inside 40. */
+export const DEFAULT_AGENT_MAX_STEPS = 60;
+export const MAX_AGENT_MAX_STEPS = 200;
+
+/** A step count, or empty for the default. */
+export const validSteps = (raw: string): boolean => !raw || (/^\d+$/.test(raw) && Number(raw) >= 12 && Number(raw) <= MAX_AGENT_MAX_STEPS);
+
+/** What to hand the container: what is saved, or the default where nothing was said. */
+export const agentMaxSteps = (cfg: Pick<UnderstoryConfig, "agentMaxSteps">): string => cfg.agentMaxSteps.trim() || String(DEFAULT_AGENT_MAX_STEPS);
+
 export function config(): UnderstoryConfig {
   const saved = setting("config");
   const raw = (saved && typeof saved === "object" ? saved : {}) as Record<string, unknown>;
@@ -84,6 +101,7 @@ export function config(): UnderstoryConfig {
     llm: raw.llm && typeof raw.llm === "object" ? (raw.llm as LlmChoice) : { source: "auto" },
     dreamInterval: typeof raw.dreamInterval === "string" && validInterval(raw.dreamInterval) ? raw.dreamInterval : "",
     dreamAt: typeof raw.dreamAt === "string" && validTime(raw.dreamAt) ? raw.dreamAt : "",
+    agentMaxSteps: typeof raw.agentMaxSteps === "string" && validSteps(raw.agentMaxSteps) ? raw.agentMaxSteps : "",
   };
 }
 
@@ -102,7 +120,7 @@ export function withSavedKey(llm: LlmChoice): LlmChoice {
 export function saveConfig(next: UnderstoryConfig): UnderstoryConfig {
   const llm = withSavedKey(next.llm);
   // A set time wins, and Understory's own timer is left off: two passes a day would be one too many.
-  putSettings({ config: { llm, dreamInterval: next.dreamAt ? "" : next.dreamInterval, dreamAt: next.dreamAt } });
+  putSettings({ config: { llm, dreamInterval: next.dreamAt ? "" : next.dreamInterval, dreamAt: next.dreamAt, agentMaxSteps: next.agentMaxSteps || "" } });
   scheduleDreams();
   return config();
 }
@@ -199,6 +217,8 @@ export async function spec(cfg: UnderstoryConfig, auth: string, networkMode = "h
       `LLM_API_KEY=${llm.apiKey}`,
       `LLM_API_FORMAT=${llm.format}`,
       `LLM_MODEL=${llm.model}`,
+      // Understory's default of 12 steps is enough to read the memory and not to tidy it.
+      `AGENT_MAX_STEPS=${agentMaxSteps(cfg)}`,
       // At a set time the portal starts the pass itself: Understory's timer stays off.
       ...(cfg.dreamInterval && !cfg.dreamAt ? [`DREAM_INTERVAL=${cfg.dreamInterval}`] : []),
     ],
@@ -331,7 +351,15 @@ async function stale(): Promise<boolean> {
   const made = (await docker().containers.inspect(CONTAINER)) as Inspected | undefined;
   if (!made) return false;
   const base = made.Config?.Env?.find((line) => line.startsWith("LLM_API_BASE_URL="));
-  return (config().llm.source === "auto" && base !== `LLM_API_BASE_URL=${modelServerUrl()}`) || made.HostConfig?.NetworkMode !== (await docker().sharedNetwork());
+  // The step limit reaches Understory only as part of its environment, so a container made before it
+  // was said runs with Understory's own 12 however the portal is configured. Without this, `spec`
+  // says one thing and the running container does another, quietly, until something else remakes it.
+  const steps = made.Config?.Env?.find((line) => line.startsWith("AGENT_MAX_STEPS="));
+  return (
+    (config().llm.source === "auto" && base !== `LLM_API_BASE_URL=${modelServerUrl()}`) ||
+    steps !== `AGENT_MAX_STEPS=${agentMaxSteps(config())}` ||
+    made.HostConfig?.NetworkMode !== (await docker().sharedNetwork())
+  );
 }
 
 /**
@@ -718,13 +746,19 @@ export async function dreamNow(): Promise<DreamRun> {
   try {
     if (!(await runningHere())) throw new Error("Understory is not running");
     const report = await run("dream");
+    // A run stopped for want of steps comes back as a result, with the complaint only in its summary.
+    // Taken that way it is reported as a pass that went fine, which is how a nightly tidy-up can be
+    // failing for weeks without a single sign of it.
+    const outOfSteps = /used all \d+ steps/.test(String(report.summary ?? ""));
     result = {
       at: new Date().toISOString(),
-      ok: true,
+      ok: !outOfSteps,
       ran: report.ran === true,
-      said: report.ran
-        ? `${report.filesChanged?.length ?? 0} ${report.filesChanged?.length === 1 ? "file" : "files"} changed${report.summary ? ` — ${firstLine(report.summary)}` : ""}`
-        : report.reason || "Nothing to do",
+      said: outOfSteps
+        ? `Stopped short at ${agentMaxSteps(config())} steps — ${report.filesChanged?.length ?? 0} ${report.filesChanged?.length === 1 ? "file" : "files"} changed, possibly half written. Raise the limit if this repeats.`
+        : report.ran
+          ? `${report.filesChanged?.length ?? 0} ${report.filesChanged?.length === 1 ? "file" : "files"} changed${report.summary ? ` — ${firstLine(report.summary)}` : ""}`
+          : report.reason || "Nothing to do",
     };
   } catch (e) {
     result = { at: new Date().toISOString(), ok: false, said: (e as Error).message };

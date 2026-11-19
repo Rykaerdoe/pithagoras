@@ -39,7 +39,12 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git openssh-client ca-certificates curl wget \
       sudo ripgrep fd-find file \
+      g++ make clang clang-tidy cppcheck clang-format lua5.1 luarocks \
     && rm -rf /var/lib/apt/lists/*
+
+# Wrath-of-the-Lich-King modding: pi builds and lints C++ (AzerothCore) and Lua
+# for this box's own work. Not upstream's use case, so they live here.
+RUN luarocks install luacheck
 
 # The sandbox (Settings → Sandbox, off until switched on): each agent's commands
 # and file tools run as a user of its own, which the portal makes as needed,
