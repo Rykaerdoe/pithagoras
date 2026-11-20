@@ -746,18 +746,25 @@ export async function dreamNow(): Promise<DreamRun> {
   try {
     if (!(await runningHere())) throw new Error("Understory is not running");
     const report = await run("dream");
-    // A run stopped for want of steps comes back as a result, with the complaint only in its summary.
-    // Taken that way it is reported as a pass that went fine, which is how a nightly tidy-up can be
-    // failing for weeks without a single sign of it.
-    const outOfSteps = /used all \d+ steps/.test(String(report.summary ?? ""));
+    // A run that failed comes back as a result, not a throw: Understory reports the failure only
+    // inside the summary, prefixed "dream run failed:". Read that as a pass that went fine and a
+    // nightly tidy-up can be failing for weeks without a sign of it - it ran, it changed nothing,
+    // and Settings still shows a green tick. Ran out of steps is one such failure worth naming
+    // apart, because the remedy (raise AGENT_MAX_STEPS) is a number the operator can change.
+    const summary = String(report.summary ?? "");
+    const failed = summary.startsWith("dream run failed:");
+    const outOfSteps = /used all \d+ steps/.test(summary);
+    const files = `${report.filesChanged?.length ?? 0} ${report.filesChanged?.length === 1 ? "file" : "files"}`;
     result = {
       at: new Date().toISOString(),
-      ok: !outOfSteps,
+      ok: !failed,
       ran: report.ran === true,
       said: outOfSteps
-        ? `Stopped short at ${agentMaxSteps(config())} steps — ${report.filesChanged?.length ?? 0} ${report.filesChanged?.length === 1 ? "file" : "files"} changed, possibly half written. Raise the limit if this repeats.`
-        : report.ran
-          ? `${report.filesChanged?.length ?? 0} ${report.filesChanged?.length === 1 ? "file" : "files"} changed${report.summary ? ` — ${firstLine(report.summary)}` : ""}`
+        ? `Stopped short at ${agentMaxSteps(config())} steps — ${files} changed, possibly half written. Raise the limit if this repeats.`
+        : failed
+          ? `${files} changed — ${summary}`
+          : report.ran
+          ? `${files} changed${report.summary ? ` — ${firstLine(report.summary)}` : ""}`
           : report.reason || "Nothing to do",
     };
   } catch (e) {
