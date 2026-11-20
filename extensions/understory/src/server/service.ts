@@ -60,9 +60,9 @@ export interface UnderstoryConfig {
   dreamAt: string;
   /**
    * How far one pass of the model may go, handed to Understory as AGENT_MAX_STEPS.
-   * Empty is the default below. Understory's own is 12 steps, which reads a memory
-   * but cannot tidy one: a pass stopped at the limit leaves half-written files and
-   * says nothing was wrong.
+   * Empty is Understory's own default, 12 steps, which reads a memory but cannot
+   * tidy one: a pass stopped at the limit leaves half-written files behind, and
+   * until recently said nothing was wrong. Say a number to give it more room.
    */
   agentMaxSteps: string;
 }
@@ -83,15 +83,24 @@ export function validInterval(raw: string): boolean {
   return ms !== null && ms >= 5 * 60_000;
 }
 
-/** Understory's own limit is 12. Measured against it: a pass over 27 concepts needed more than that and finished inside 40. */
-export const DEFAULT_AGENT_MAX_STEPS = 60;
+/** The floor is Understory's own default: below it a pass cannot even finish a tidy-up. */
+export const MIN_AGENT_MAX_STEPS = 12;
+/** A generous ceiling, not a measured one: a pass is long before it is near this. */
 export const MAX_AGENT_MAX_STEPS = 200;
 
-/** A step count, or empty for the default. */
-export const validSteps = (raw: string): boolean => !raw || (/^\d+$/.test(raw) && Number(raw) >= 12 && Number(raw) <= MAX_AGENT_MAX_STEPS);
+/** A step count, or empty for Understory's own default of 12. */
+export const validSteps = (raw: string): boolean =>
+  !raw || (/^\d+$/.test(raw) && Number(raw) >= MIN_AGENT_MAX_STEPS && Number(raw) <= MAX_AGENT_MAX_STEPS);
 
-/** What to hand the container: what is saved, or the default where nothing was said. */
-export const agentMaxSteps = (cfg: Pick<UnderstoryConfig, "agentMaxSteps">): string => cfg.agentMaxSteps.trim() || String(DEFAULT_AGENT_MAX_STEPS);
+/** What to hand the container, or empty to hand it nothing and let Understory answer for itself. */
+export const agentMaxSteps = (cfg: Pick<UnderstoryConfig, "agentMaxSteps">): string =>
+  String(cfg.agentMaxSteps ?? "").trim();
+
+/** The environment line that carries it: none at all when nothing was said, so the container holds what was chosen. */
+const agentMaxStepsEnv = (cfg: Pick<UnderstoryConfig, "agentMaxSteps">): string[] => {
+  const steps = agentMaxSteps(cfg);
+  return steps ? [`AGENT_MAX_STEPS=${steps}`] : [];
+};
 
 export function config(): UnderstoryConfig {
   const saved = setting("config");
@@ -217,8 +226,8 @@ export async function spec(cfg: UnderstoryConfig, auth: string, networkMode = "h
       `LLM_API_KEY=${llm.apiKey}`,
       `LLM_API_FORMAT=${llm.format}`,
       `LLM_MODEL=${llm.model}`,
-      // Understory's default of 12 steps is enough to read the memory and not to tidy it.
-      `AGENT_MAX_STEPS=${agentMaxSteps(cfg)}`,
+      // A tidy-up stopped at Understory's own 12 steps leaves half-written files: this is the room to give it.
+      ...agentMaxStepsEnv(cfg),
       // At a set time the portal starts the pass itself: Understory's timer stays off.
       ...(cfg.dreamInterval && !cfg.dreamAt ? [`DREAM_INTERVAL=${cfg.dreamInterval}`] : []),
     ],
@@ -355,9 +364,10 @@ async function stale(): Promise<boolean> {
   // was said runs with Understory's own 12 however the portal is configured. Without this, `spec`
   // says one thing and the running container does another, quietly, until something else remakes it.
   const steps = made.Config?.Env?.find((line) => line.startsWith("AGENT_MAX_STEPS="));
+  const wanted = agentMaxStepsEnv(config())[0] ?? "";
   return (
     (config().llm.source === "auto" && base !== `LLM_API_BASE_URL=${modelServerUrl()}`) ||
-    steps !== `AGENT_MAX_STEPS=${agentMaxSteps(config())}` ||
+    (steps ?? "") !== wanted ||
     made.HostConfig?.NetworkMode !== (await docker().sharedNetwork())
   );
 }
@@ -760,7 +770,7 @@ export async function dreamNow(): Promise<DreamRun> {
       ok: !failed,
       ran: report.ran === true,
       said: outOfSteps
-        ? `Stopped short at ${agentMaxSteps(config())} steps — ${files} changed, possibly half written. Raise the limit if this repeats.`
+        ? `Stopped short at ${agentMaxSteps(config()) || MIN_AGENT_MAX_STEPS} steps — ${files} changed, possibly half written. Raise the step limit in Understory's settings if this repeats.`
         : failed
           ? `${files} changed — ${summary}`
           : report.ran
